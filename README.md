@@ -1,6 +1,6 @@
 # 📊 Classification interactive : Telco Customer Churn
 
-Projet Challenge 1 · Data Mining · ENSI 2026-2027 · Cas 13 (Télécom, attrition client)
+Projet réalisé par Aya Mhiri (II3 IA) · Challenge 1 · Data Mining · ENSI 2026-2027 · Cas 13 (Télécom, attrition client)
 
 Application web interactive : l'utilisateur charge les données (téléchargement automatique ou CSV), choisit la cible et les
 variables, règle le prétraitement, choisit les modèles et leurs hyperparamètres, **entraîne** (via l'API FastAPI),
@@ -8,12 +8,37 @@ variables, règle le prétraitement, choisit les modèles et leurs hyperparamèt
 
 | | Lien |
 |---|---|
-| Application déployée | _à compléter_ |
-| API (Swagger `/docs`) | _à compléter_ |
-| One-pager | `docs/one_pager.pdf` |
+| Application déployée | https://telco-churndata.streamlit.app/ |
+| API (Swagger `/docs`) | https://telco-churn-xai.onrender.com/docs |
+| One-pager | [docs/one_pager.pdf](docs/one_pager.pdf) |
 
 ## Captures d'écran
-_À ajouter (dossier `docs/`)_ : onglets Données, Modélisation, Évaluation (ROC, seuil), Prédiction.
+
+**1. Données** : aperçu, valeurs manquantes, classes, corrélations, taux de départ par variable
+
+![Données](docs/01_donnees.png)
+![Valeurs manquantes et classes](docs/02_manquants_classes.png)
+![Corrélations](docs/03_correlation.png)
+![Taux de départ par variable](docs/04_taux_par_variable.png)
+
+**2. Préparation**
+
+![Préparation](docs/05_preparation.png)
+
+**3. Modélisation** : tableau comparatif et hyperparamètres retenus
+
+![Tableau comparatif](docs/06_comparatif.png)
+![Hyperparamètres](docs/07_hyperparametres.png)
+
+**4. Évaluation** : ROC, précision-rappel, seuil réglable
+
+![ROC et PR](docs/08_roc_pr.png)
+![Seuil](docs/09_seuil.png)
+
+**5. Prédiction et API**
+
+![Prédiction](docs/10_prediction.png)
+![Swagger](docs/11_swagger.png)
 
 ## Architecture
 ```
