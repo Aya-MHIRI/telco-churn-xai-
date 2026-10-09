@@ -1,0 +1,7 @@
+# API FastAPI seule (déploiement Render / Hugging Face Spaces)
+pandas>=2.0
+numpy>=1.24
+scikit-learn>=1.3
+xgboost>=2.0
+fastapi>=0.110
+uvicorn>=0.27
