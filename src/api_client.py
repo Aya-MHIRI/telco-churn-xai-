@@ -38,9 +38,9 @@ def api_post(path, payload, url=None, timeout=120):
     return r.json()
 
 
-def api_get(path, url=None, timeout=60):
+def api_get(path, params=None, url=None, timeout=60):
     url = url or get_api_url()
-    r = requests.get(f"{url}{path}", timeout=timeout)
+    r = requests.get(f"{url}{path}", params=params, timeout=timeout)
     if not r.ok:
         try:
             detail = r.json().get("detail", r.text)

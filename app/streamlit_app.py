@@ -23,15 +23,19 @@ import streamlit as st
 from src import data as D
 from src import eda
 from src import models as M
+from src import explain_service as EX
 from src import plots
 from src import preprocess as P
 from src import trainer as T
+from src import xai_plots as XP
 from src.api_client import api_get, api_health, api_post, get_api_url
 
 st.set_page_config(page_title="Classification interactive", page_icon="📊", layout="wide")
 st.session_state.setdefault("threshold", 0.5)
 
 IMPUTERS = {"Médiane": "median", "Moyenne": "mean", "Zéro (0)": "zero"}
+SENSITIVE_HINTS = ["gender", "Gender", "sex", "Sex", "SeniorCitizen", "Partner", "Dependents", "age", "Age",
+                   "race", "Race", "marital", "Marital", "Married"]
 
 
 class TrainingError(Exception):
@@ -49,6 +53,89 @@ def show_table(df, fmt=None, highlight_max=False):
         st.dataframe(sty, width="stretch")
     except Exception:
         st.dataframe(df, width="stretch")
+
+
+# --------------------------------------------------------------------------- #
+# Module 5 : outils communs (appel de l'API ou calcul local selon la source de l'entraînement)
+# --------------------------------------------------------------------------- #
+def is_api(tr):
+    return tr["source"] == "API FastAPI"
+
+
+def cached(key, fn):
+    """Garde le résultat d'un calcul d'explication dans la session Streamlit (évite de le refaire à chaque clic)."""
+    xs = st.session_state.setdefault("xai", {})
+    if key not in xs:
+        xs[key] = fn()
+    return xs[key]
+
+
+def xai_sync(tr, method, path, local_fn, payload=None, params=None, timeout=180):
+    """Calcul court : appel direct de l'API (session entraînée côté API) ou calcul local."""
+    if is_api(tr):
+        full = f"/sessions/{tr['session_id']}{path}"
+        if method == "POST":
+            return api_post(full, payload, timeout=timeout)
+        return api_get(full, params=params, timeout=timeout)
+    return local_fn(st.session_state["local_session"])
+
+
+def xai_job(tr, path, payload, local_fn, timeout_s=900):
+    """Calcul long : tâche de fond côté API (avec avancement) ou calcul local avec barre de progression."""
+    bar, status = st.progress(0.0), st.empty()
+    try:
+        if is_api(tr):
+            job = api_post(f"/sessions/{tr['session_id']}{path}", payload, timeout=60)
+            t0 = time.time()
+            while True:
+                j = api_get(f"/jobs/{job['job_id']}")
+                bar.progress(min(float(j["progress"]), 1.0))
+                status.write(f"⚙️ {j['message']}")
+                if j["status"] == "done":
+                    return j["result"]
+                if j["status"] == "error":
+                    raise TrainingError(j["error"])
+                if time.time() - t0 > timeout_s:
+                    raise TrainingError("Délai dépassé.")
+                time.sleep(1.0)
+
+        def cb(i, n, msg):
+            bar.progress(min(i / n, 1.0) if n else 0.0)
+            status.write(f"⚙️ {msg}")
+        return local_fn(st.session_state["local_session"], cb)
+    finally:
+        status.empty()
+        bar.empty()
+
+
+def show_xai_error(e):
+    if isinstance(e, requests.RequestException):
+        st.error(f"API injoignable ({type(e).__name__}). Elle est peut-être en veille : réessayez dans une minute.")
+    elif "Session introuvable" in str(e):
+        st.error("La session d'entraînement a expiré côté API (redémarrage du service). "
+                 "Ré-entraînez les modèles dans l'onglet 3.")
+    else:
+        st.error(f"{e}")
+
+
+def render_form(schema, form_key, button):
+    """Formulaire de saisie d'un individu, construit à partir du schéma des variables. -> (valeurs, soumis)."""
+    with st.form(form_key):
+        fcols = st.columns(3)
+        data_in = {}
+        for i, (c, sc) in enumerate(schema.items()):
+            with fcols[i % 3]:
+                if sc["type"] == "cat":
+                    ch = sc["choices"]
+                    data_in[c] = st.selectbox(c, ch, index=ch.index(sc["mode"]), key=f"{form_key}_{c}")
+                elif float(sc["min"]).is_integer() and float(sc["max"]).is_integer():
+                    data_in[c] = int(st.number_input(c, int(sc["min"]), int(sc["max"]), int(sc["median"]),
+                                                     key=f"{form_key}_{c}"))
+                else:
+                    data_in[c] = float(st.number_input(c, float(sc["min"]), float(sc["max"]), float(sc["median"]),
+                                                       key=f"{form_key}_{c}"))
+        submitted = st.form_submit_button(button, type="primary")
+    return data_in, submitted
 
 
 # =========================================================================== #
@@ -113,7 +200,7 @@ NUM_ALL = [c for c in FEATURES_ALL if pd.api.types.is_numeric_dtype(df[c])]
 # Réinitialiser les résultats si le jeu de données ou la cible change
 sig = (source, upload_name, target, str(positive))
 if st.session_state.get("sig") != sig:
-    for k in ["prep", "train", "local_session", "last_pred"]:
+    for k in ["prep", "train", "local_session", "last_pred", "xai"]:
         st.session_state.pop(k, None)
     st.session_state["sig"] = sig
 
@@ -128,8 +215,8 @@ st.title("📊 Application de classification interactive")
 st.caption(f"Cible : **{target}** (classe positive : {positive}) · {len(df):,} observations · "
            f"{len(FEATURES_ALL)} variables explicatives".replace(",", " "))
 
-tab1, tab2, tab3, tab4, tab5 = st.tabs(["1️⃣ Données", "2️⃣ Préparation", "3️⃣ Modélisation", "4️⃣ Évaluation",
-                                        "5️⃣ Prédiction"])
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["1️⃣ Données", "2️⃣ Préparation", "3️⃣ Modélisation", "4️⃣ Évaluation",
+                                              "5️⃣ Explicabilité (XAI)", "6️⃣ Prédiction"])
 
 # =========================================================================== #
 # MODULE 1 : Données
@@ -234,7 +321,7 @@ with tab2:
                 st.session_state["prep"] = P.prepare(
                     df, target, features, test_size=test_pct / 100, imputer=IMPUTERS[imputer_lbl], scale=scale,
                     simplify=simplify, engineer=engineer, seed=int(seed))
-                for k in ["train", "local_session", "last_pred"]:
+                for k in ["train", "local_session", "last_pred", "xai"]:
                     st.session_state.pop(k, None)
             except Exception as e:
                 st.error(f"Erreur de préparation : {e}")
@@ -337,11 +424,13 @@ with tab3:
                 bar.progress(1.0)
                 st.session_state["train"] = {
                     "source": where, "session_id": result.get("session_id"), "models": result["models"],
+                    "tid": int(time.time() * 1000),
                     "scores": {m: np.array(v) for m, v in result["scores"].items()},
                     "y_test": np.array(result["y_test"]), "best_params": result["best_params"],
                     "cv_scores": result["cv_scores"], "n_train": result["n_train"], "n_test": result["n_test"],
                     "schema": result["schema"], "raw_features": result["raw_features"]}
                 st.session_state.pop("last_pred", None)
+                st.session_state.pop("xai", None)
             except TrainingError as e:
                 status.empty()
                 st.error(f"Échec de l'entraînement : {e}")
@@ -421,44 +510,206 @@ with tab4:
             st.info("La régression logistique est aussi le meilleur modèle : performance et simplicité se rejoignent.")
 
 # =========================================================================== #
-# Prédiction d'un individu (appelle l'API)
+# MODULE 5 : Explicabilité (XAI)
 # =========================================================================== #
 with tab5:
     tr = st.session_state.get("train")
     if not tr:
         st.info("Entraînez d'abord des modèles (onglet 3).")
     else:
+        thr = st.session_state["threshold"]
+        tid = tr["tid"]
+        xs = st.session_state.setdefault("xai", {})
+        order = list(M.evaluate_scores(tr["scores"], tr["y_test"], thr).index)
+        mname = st.selectbox("Modèle à expliquer", order, key="xai_model",
+                             help="Classés du meilleur au moins bon (AUC sur le jeu de test).")
+        st.caption(f"Calculs effectués par : **{tr['source']}**" + (
+            "" if not is_api(tr) else " (l'instance gratuite peut mettre quelques secondes à répondre)."))
+        xg, xl, xe = st.tabs(["🌍 Explications globales", "👤 Explication locale", "⚖️ Équité"])
+
+        # ------------------------------ Globales -------------------------------- #
+        with xg:
+            st.subheader("Importance propre au modèle")
+            try:
+                nat = cached(("native", tid, mname), lambda: xai_sync(
+                    tr, "GET", "/explain/native", lambda s_: EX.native(s_, mname), params={"model": mname}))
+                if nat["available"]:
+                    st.plotly_chart(XP.plot_native_importance(nat["importance"]), width="stretch")
+                else:
+                    st.info("KNN n'a pas d'importance interne : utilisez l'importance par permutation ci-dessous.")
+            except Exception as e:
+                show_xai_error(e)
+
+            st.subheader("Importance par permutation (comparable entre modèles)")
+            st.caption("Baisse d'AUC quand les valeurs d'une variable sont mélangées au hasard : plus la baisse est "
+                       "grande, plus le modèle dépend de la variable. Calculée pour tous les modèles entraînés.")
+            if st.button("Calculer l'importance par permutation"):
+                try:
+                    res = xai_job(tr, "/explain/permutation", {"n_repeats": 5, "n_max": 500},
+                                  lambda s_, cb: EX.permutation(s_, 5, 500, cb))
+                    xs[("perm", tid)] = res["importance"]
+                except Exception as e:
+                    show_xai_error(e)
+            if ("perm", tid) in xs:
+                st.plotly_chart(XP.plot_permutation_comparison(xs[("perm", tid)]), width="stretch")
+
+            st.subheader("SHAP : effet des variables sur les prédictions")
+            is_knn = mname == "KNN"
+            n_max = 60 if is_knn else 500
+            n_s = st.slider("Nombre d'individus du jeu de test utilisés", 20, min(n_max, tr["n_test"]),
+                            min(60 if is_knn else 200, tr["n_test"]), key="shap_n",
+                            help="Plus il y en a, plus le graphique est fiable, mais plus le calcul est long.")
+            if is_knn:
+                st.caption("KNN : SHAP par noyau (KernelExplainer), plus lent, donc échantillon limité à 60.")
+            if st.button("Calculer SHAP"):
+                try:
+                    xs[("shapg", tid, mname)] = xai_job(
+                        tr, "/explain/shap-global", {"model": mname, "n": int(n_s)},
+                        lambda s_, cb: EX.shap_global(s_, mname, int(n_s), cb))
+                except Exception as e:
+                    show_xai_error(e)
+            sg = xs.get(("shapg", tid, mname))
+            if sg:
+                st.caption(f"Calculé sur {sg['n']} individus du jeu de test. Unités : {sg['units']}.")
+                st.plotly_chart(XP.plot_beeswarm(sg["values"], sg["data"], sg["feature_names"]), width="stretch")
+                st.markdown("Lecture : chaque point est un individu ; **à droite**, la variable augmente la probabilité "
+                            "de la classe positive ; **couleur rouge** = valeur élevée de la variable.")
+                mean_abs = np.abs(np.array(sg["values"], float)).mean(0)
+                top_feats = [sg["feature_names"][j] for j in np.argsort(-mean_abs)]
+                dep = st.multiselect("Graphiques de dépendance SHAP", sg["feature_names"], default=top_feats[:2],
+                                     max_selections=4)
+                dcols = st.columns(2) if dep else []
+                for i, f in enumerate(dep):
+                    dcols[i % 2].plotly_chart(XP.plot_dependence(sg["values"], sg["data"], sg["feature_names"], f),
+                                              width="stretch")
+                with st.expander("Importance SHAP agrégée par variable d'origine"):
+                    st.plotly_chart(XP.plot_importance_by_variable(sg["importance_by_variable"]), width="stretch")
+            else:
+                st.info("Cliquez sur « Calculer SHAP » pour afficher le summary plot et les dépendances.")
+
+        # ------------------------------- Locale --------------------------------- #
+        with xl:
+            st.subheader("Expliquer un individu")
+            mode = st.radio("Individu à expliquer", ["Individu du jeu de test", "Saisir un individu fictif"],
+                            horizontal=True)
+            data_in, true_label, go_btn = None, None, False
+            if mode == "Individu du jeu de test":
+                pos = int(st.number_input("Position dans le jeu de test", 0, tr["n_test"] - 1, 0))
+                try:
+                    ind = cached(("ind", tid, pos), lambda: xai_sync(
+                        tr, "GET", f"/individual/{pos}", lambda s_: EX.get_individual(s_, pos)))
+                    data_in, true_label = ind["data"], ind["true_label"]
+                    st.dataframe(pd.DataFrame([data_in]), width="stretch", hide_index=True)
+                    go_btn = st.button("🔍 Expliquer cet individu", type="primary")
+                except Exception as e:
+                    show_xai_error(e)
+            else:
+                data_in, go_btn = render_form(tr["schema"], "xai_form", "🔍 Expliquer cet individu")
+                st.caption("Gardez des valeurs cohérentes (par ex. total facturé ≈ ancienneté × facture mensuelle).")
+
+            if go_btn and data_in is not None:
+                payload = {"model": mname, "threshold": float(thr), "data": T._py(data_in)}
+                try:
+                    with st.spinner("Calcul des explications SHAP et LIME…"):
+                        res = xai_sync(tr, "POST", "/explain/compare",
+                                       lambda s_: EX.compare_local(s_, mname, data_in, thr),
+                                       payload=payload, timeout=180)
+                    xs["local"] = {"res": res, "true": true_label, "source": tr["source"]}
+                except Exception as e:
+                    show_xai_error(e)
+
+            loc = xs.get("local")
+            if loc:
+                res = loc["res"]
+                st.divider()
+                st.caption(f"Modèle : **{res['model']}** · explications calculées par : **{loc['source']}**")
+                r1, r2, r3, r4 = st.columns(4)
+                r1.metric("Probabilité de la classe positive", f"{res['probability']:.1%}")
+                r2.metric("Seuil de décision", f"{res['threshold']:.0%}")
+                r3.metric("Décision", "Positif" if res["decision"] else "Négatif")
+                if loc["true"] is not None:
+                    r4.metric("Réalité (jeu de test)", "Positif" if loc["true"] else "Négatif")
+                st.info(f"💬 {res['summary']}")
+
+                sh = res["shap"]
+                contrib = pd.DataFrame(sh["contributions"])
+                if sh["n_other_features"] > 0:
+                    contrib = pd.concat([contrib, pd.DataFrame([{
+                        "label": f"{sh['n_other_features']} autres variables",
+                        "contribution": sh["other_contribution"]}])], ignore_index=True)
+                st.plotly_chart(XP.plot_waterfall(contrib, sh["base_value"], sh["units"], res["probability"]),
+                                width="stretch")
+                if sh["units"] == "log-odds":
+                    st.caption("Les contributions sont en log-odds (échelle du modèle) : leur somme avec la valeur de "
+                               "base donne le score, converti en probabilité par la fonction logistique.")
+                st.plotly_chart(XP.plot_lime(res["lime"]["rules"], "Explication LIME du même individu"),
+                                width="stretch")
+                st.caption(f"Qualité de l'approximation locale de LIME (R²) : {res['lime']['local_fit_r2']:.2f}")
+
+                cm = res["comparison"]
+                st.subheader("SHAP et LIME sont-ils cohérents ?")
+                q1, q2 = st.columns(2)
+                q1.metric(f"Variables communes dans le top {cm['k']}", f"{cm['overlap']} / {cm['k']}")
+                q2.metric("Accord sur le sens de l'effet",
+                          "—" if cm["sign_agreement"] is None else f"{cm['sign_agreement']:.0%}")
+                ct = pd.DataFrame(cm["table"])[["label", "SHAP", "LIME", "Rang SHAP", "Rang LIME", "Même sens"]]
+                show_table(ct.rename(columns={"label": "Variable"}), fmt={"SHAP": "{:+.3f}", "LIME": "{:+.3f}"})
+                st.caption("SHAP et LIME sont sur des échelles différentes : on compare les rangs et le sens de "
+                           "l'effet, pas les valeurs.")
+
+        # ------------------------------- Équité --------------------------------- #
+        with xe:
+            st.subheader("Variables sensibles et équité")
+            st.caption("Le modèle s'appuie-t-il sur des variables sensibles (sexe, âge, situation familiale…) ? "
+                       "Même sans les utiliser directement, d'autres variables peuvent en être des substituts (proxies).")
+            default_sens = [c for c in tr["raw_features"] if c in SENSITIVE_HINTS]
+            sens = st.multiselect("Variables sensibles à examiner", tr["raw_features"], default=default_sens)
+            if sens:
+                try:
+                    fr_ = cached(("fair", tid, mname, round(thr, 2), tuple(sens)), lambda: xai_sync(
+                        tr, "GET", "/fairness", lambda s_: EX.fairness(s_, mname, thr, sens),
+                        params={"model": mname, "threshold": thr, "sensitive": ",".join(sens)}))
+                    rep = pd.DataFrame(fr_["report"])
+                    show_table(rep, fmt={c: "{:.3f}" for c in rep.columns if c not in ("Variable", "Groupe", "Effectif")})
+                    st.plotly_chart(XP.plot_fairness(rep), width="stretch")
+                    st.markdown("**Écart de parité** : différence maximale du taux de prédictions positives entre groupes.")
+                    st.dataframe(pd.DataFrame(fr_["gaps"]).round(3), width="stretch", hide_index=True)
+                    sg = xs.get(("shapg", tid, mname))
+                    if sg:
+                        imp = pd.DataFrame(sg["importance_by_variable"])
+                        part = imp[imp["Variable"].isin(sens)]["Part"].sum()
+                        st.markdown(f"**Part de l'importance SHAP portée par les variables sensibles : {part:.1%}**")
+                    else:
+                        st.info("Calculez SHAP (onglet « Explications globales ») pour mesurer le poids de ces variables.")
+                except Exception as e:
+                    show_xai_error(e)
+            else:
+                st.info("Sélectionnez au moins une variable sensible.")
+
+# =========================================================================== #
+# Prédiction d'un individu (appelle l'API)
+# =========================================================================== #
+with tab6:
+    tr = st.session_state.get("train")
+    if not tr:
+        st.info("Entraînez d'abord des modèles (onglet 3).")
+    else:
         st.subheader("Prédire pour un nouvel individu")
         pm = st.selectbox("Modèle", list(tr["scores"]), key="pred_model")
-        schema = tr["schema"]
-        with st.form("pred_form"):
-            fcols = st.columns(3)
-            data_in = {}
-            for i, (c, sc) in enumerate(schema.items()):
-                with fcols[i % 3]:
-                    if sc["type"] == "cat":
-                        ch = sc["choices"]
-                        data_in[c] = st.selectbox(c, ch, index=ch.index(sc["mode"]))
-                    elif float(sc["min"]).is_integer() and float(sc["max"]).is_integer():
-                        data_in[c] = int(st.number_input(c, int(sc["min"]), int(sc["max"]), int(sc["median"])))
-                    else:
-                        data_in[c] = float(st.number_input(c, float(sc["min"]), float(sc["max"]), float(sc["median"])))
-            go_pred = st.form_submit_button("🔮 Prédire", type="primary")
+        data_in, go_pred = render_form(tr["schema"], "pred_form", "🔮 Prédire")
         st.caption("Gardez des valeurs cohérentes (par ex. total facturé ≈ ancienneté × facture mensuelle).")
 
         if go_pred:
             thr = st.session_state["threshold"]
             try:
-                if tr["source"] == "API FastAPI":
+                if is_api(tr):
                     out = api_post(f"/sessions/{tr['session_id']}/predict",
                                    {"model": pm, "threshold": float(thr), "data": T._py(data_in)})
                 else:
                     out = T.predict_one(st.session_state["local_session"], pm, data_in, thr)
                 st.session_state["last_pred"] = out | {"_source": tr["source"]}
-            except requests.RequestException as e:
-                st.error(f"API injoignable ({type(e).__name__}). Relancez l'API ou ré-entraînez en local.")
-            except RuntimeError as e:
-                st.error(f"{e}")
+            except Exception as e:
+                show_xai_error(e)
 
         out = st.session_state.get("last_pred")
         if out:

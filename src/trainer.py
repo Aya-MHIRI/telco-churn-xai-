@@ -121,6 +121,11 @@ def run_training(cfg, data, progress=None, prepared=False):
         "best_params": best_params, "cv_scores": cv_scores,
         "n_train": len(prep["X_train"]), "n_test": len(prep["X_test"]),
         "pos_rate_train": float(prep["y_train"].mean()), "pos_rate_test": float(prep["y_test"].mean()),
+        # --- données gardées côté service pour le Module 5 (explicabilité) ---
+        "X_test": prep["X_test"],
+        "background": prep["X_train"].sample(min(100, len(prep["X_train"])), random_state=42),
+        "lime_train": prep["X_train"].sample(min(1500, len(prep["X_train"])), random_state=42),
+        "_cache": {},
     }
 
 

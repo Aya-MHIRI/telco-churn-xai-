@@ -10,3 +10,5 @@ fastapi>=0.110
 uvicorn>=0.27
 requests>=2.31
 kagglehub>=0.3
+lime==0.2.0.1
+shap==0.54.1
