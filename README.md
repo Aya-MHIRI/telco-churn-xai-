@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # 📊 Classification interactive : Telco Customer Churn
 
 Projet Challenge 1 · Data Mining · ENSI 2026-2027 · Cas 13 (Télécom, attrition client)
@@ -82,3 +83,6 @@ docs/                    déploiement, modèle de one-pager, captures
 
 ## Déploiement
 Voir `docs/DEPLOIEMENT.md`.
+=======
+# telco-churn-xai-
+>>>>>>> e5932dcb6a70c8a2bd2cf1a77c1725c3ea216a37
